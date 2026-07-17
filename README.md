@@ -111,7 +111,7 @@ Each model row means:
 
 `business_line` supplies a population-level signal for customers with little or no history. The historical business-line flag adds a personalized signal once prior purchases exist.
 
-The local feature table retains raw columns for auditing and reproducible ablation tests. Validation-driven backward elimination reduced the current CatBoost model to 12 inputs. It keeps the stronger receipt, quantity, product-context, affinity, and expected-reorder signals while ignoring five redundant raw or derived columns through the training configuration.
+Validation-driven backward elimination reduced the current CatBoost model and prepared training table to 12 inputs. The pipeline keeps the stronger receipt, quantity, product-context, affinity, and expected-reorder signals while omitting five redundant raw or derived columns. The training configuration also excludes those names defensively when an older prepared dataset is used.
 
 ### Output
 

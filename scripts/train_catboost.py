@@ -375,7 +375,7 @@ def ranking_metrics(
             "group_id",
             "customer_id",
             "product_id",
-            "previous_paid_purchase_count",
+            "previous_paid_quantity",
             "label",
         ]
     ].copy()
@@ -443,11 +443,11 @@ def ranking_metrics(
         positive_segments = {
             "first_purchase": (
                 positive_rows
-                & scored["previous_paid_purchase_count"].eq(0)
+                & scored["previous_paid_quantity"].eq(0)
             ),
             "repeat_purchase": (
                 positive_rows
-                & scored["previous_paid_purchase_count"].gt(0)
+                & scored["previous_paid_quantity"].gt(0)
             ),
         }
         for segment_name, segment_mask in positive_segments.items():
@@ -525,7 +525,7 @@ def train(config: dict[str, Any]) -> dict[str, Any]:
             top_k_values,
         )
         history_scores = (
-            split_frame["previous_paid_purchase_count"].fillna(0).to_numpy()
+            split_frame["previous_paid_quantity"].fillna(0).to_numpy()
             + (
                 split_frame["has_purchased_category_before"]
                 .fillna(0)
