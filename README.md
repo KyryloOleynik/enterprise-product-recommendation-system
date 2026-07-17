@@ -19,7 +19,7 @@ Turn truthful customer-product history into a ranked list of products a customer
 
 This repository contains a complete local recommendation baseline:
 
-1. clean paid purchases and received products;
+1. clean paid product purchases and remove gifts;
 2. construct point-in-time customer-product history;
 3. generate positive and negative ranking candidates;
 4. keep every customer in exactly one data split;
@@ -67,7 +67,7 @@ flowchart LR
 
 ### 1. Clean purchases
 
-[`notebooks/01_clean_purchases.ipynb`](notebooks/01_clean_purchases.ipynb) converts the private source data into one customer-date-product record and keeps paid quantity separate from total received quantity.
+[`notebooks/01_clean_purchases.ipynb`](notebooks/01_clean_purchases.ipynb) removes gifts and other non-purchase rows, then converts paid product sales into one customer-date-product record with a single `quantity` field.
 
 ### 2. Build ranking candidates
 
@@ -104,14 +104,14 @@ Each model row means:
 | Feature family | Examples |
 |---|---|
 | Product identity | `product_id`, `product_category`, `business_line` |
-| Purchase history | prior purchase count, prior paid quantity, last paid quantity |
-| Receipt history | prior receipt count, prior received quantity, last received quantity |
-| Replenishment timing | expected reorder days for the latest received quantity and quantity-adjusted replenishment progress |
+| Purchase history | prior purchase count, cumulative purchased quantity, and last purchase quantity |
+| Purchase timing | days since the last purchase and average days between purchases |
+| Replenishment timing | expected reorder days for the last purchased quantity and quantity-adjusted replenishment progress |
 | Affinity | previously purchased this category or business line |
 
 `business_line` supplies a population-level signal for customers with little or no history. The historical business-line flag adds a personalized signal once prior purchases exist.
 
-Validation-driven backward elimination reduced the current CatBoost model and prepared training table to 12 inputs. The pipeline keeps the stronger receipt, quantity, product-context, affinity, and expected-reorder signals while omitting five redundant raw or derived columns. The training configuration also excludes those names defensively when an older prepared dataset is used.
+The current purchase-only CatBoost model uses 12 inputs. It starts from the earlier 17-feature design, removes the five gift/receipt-history fields entirely, and keeps cumulative purchased quantity, purchase frequency, last quantity, purchase timing, product context, affinity, and replenishment signals.
 
 ### Output
 
@@ -197,7 +197,7 @@ model = CatBoostRanker()
 model.load_model("models/catboost_ranker.cbm")
 ```
 
-The model expects the 12-feature subset selected in the training configuration from the schema created by the candidate-building notebook. It returns relative ranking scores, not calibrated purchase probabilities.
+The model expects the 12-feature purchase-only subset selected in the training configuration from the schema created by the candidate-building notebook. It returns relative ranking scores, not calibrated purchase probabilities.
 
 ## Repository layout
 
