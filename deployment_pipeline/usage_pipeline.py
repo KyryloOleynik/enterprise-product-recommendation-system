@@ -35,7 +35,6 @@ MODEL_COLUMNS = [
     "days_since_last_paid_purchase",
     "average_days_between_customer_product_purchases",
     "std_days_between_customer_product_purchases",
-    "observed_reorder_interval_count",
     "expected_days_before_next_order",
     "previous_category_purchase_count",
     "previous_category_purchase_share",
@@ -287,7 +286,6 @@ def build_features(
             "interval_days",
             lambda values: values.std(ddof=0),
         ),
-        observed_reorder_interval_count=("interval_days", "count"),
     )
     candidates = candidates.merge(
         product_history, on="product_id", how="left", validate="one_to_one"
@@ -387,6 +385,7 @@ def evaluate(features):
     features = features[features['business_line'].isin(businesslines_purchased) | features['product_category'].isin(categories_purchased)]
 
     if len(features) > 100:
+        print('only user purchased products as candidates')
         features = features[features['product_id'].isin(products_purchased)]
 
     count = features["previous_paid_purchase_count"].fillna(0)
@@ -421,7 +420,7 @@ def evaluate(features):
         )
     )
     has_cycle = features[
-        "observed_reorder_interval_count"
+        "average_days_between_customer_product_purchases"
     ].fillna(0).gt(0)
     timing = np.where(has_cycle, due, recency)
 
@@ -532,7 +531,7 @@ def rank_with_the_final_model(candidates: pd.DataFrame):
     )
     ranked_products['rank'] = ranked_products.index + 1
 
-    return ranked_products.head(min(10, len(ranked_products)))
+    return ranked_products.head(min(20, len(ranked_products)))
 
 def main() -> None:
     parser = argparse.ArgumentParser()
