@@ -2,11 +2,11 @@
 
 # Enterprise Product Recommendation System
 
-### Privacy-first, point-in-time product ranking with CatBoost
+### Privacy-first, point-in-time product recommendations with CatBoost
 
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![CatBoost](https://img.shields.io/badge/CatBoost-1.2.10-FFCC00)](https://catboost.ai/)
-[![Model](https://img.shields.io/badge/Task-Learning--to--Rank-7C3AED)](#why-learning-to-rank)
+[![Model](https://img.shields.io/badge/Task-Binary--Classification-7C3AED)](#why-classification)
 [![Privacy](https://img.shields.io/badge/Data-Local%20Only-059669)](#privacy-by-design)
 
 Turn truthful customer-product history into a ranked list of products a customer is likely to purchase next.
@@ -23,14 +23,14 @@ This repository contains a complete local recommendation baseline:
 2. construct point-in-time customer-product history;
 3. generate positive and negative ranking candidates;
 4. keep every customer in exactly one data split;
-5. train a configurable `CatBoostRanker`;
+5. train a configurable `CatBoostClassifier`;
 6. evaluate recommendation quality against random and purchase-history baselines.
 
 The implementation is designed for a real business dataset without publishing row-level business data or identifiers. This repository includes one explicitly reviewed baseline model and aggregate evaluation artifacts.
 
-## Why learning to rank?
+## Why classification?
 
-A customer can purchase several products in one event. Predicting one class is therefore the wrong shape of problem.
+Each candidate is a binary decision: estimate whether the customer will purchase that product in the scoring event. The resulting probabilities are sorted to produce the recommendation list.
 
 For every customer scoring event, the pipeline creates a candidate group:
 
@@ -40,7 +40,7 @@ For every customer scoring event, the pipeline creates a candidate group:
 | Product purchased earlier but not now | Truthful historical negative | `0` |
 | Existing product never paid for by this customer | Sampled catalogue negative | `0` |
 
-CatBoost receives the candidates and their historical features, then learns to put the positive candidates above the negative ones.
+CatBoost receives the candidates and their historical features, then learns the probability that each candidate is positive.
 
 ```mermaid
 flowchart LR
@@ -48,7 +48,7 @@ flowchart LR
     B --> C["Point-in-time history"]
     C --> D["Candidate groups"]
     D --> E["Customer-disjoint split"]
-    E --> F["CatBoostRanker"]
+    E --> F["CatBoostClassifier"]
     F --> G["Ranked products"]
     G --> H["Ranking metrics"]
 ```
@@ -105,7 +105,7 @@ Each model row means:
 |---|---|
 | Product identity | `product_id`, `product_category`, `business_line` |
 | Purchase history | prior purchase count, cumulative purchased quantity, and last purchase quantity |
-| Purchase timing | days since the last purchase; average, variability, and count of reorder intervals |
+| Purchase timing | days since the last purchase and average and variability of reorder intervals |
 | Replenishment timing | expected days before the next order for the last purchased quantity |
 | Affinity | prior category and business-line purchase counts and shares |
 | Product demand | lifetime product purchases and customers, plus recent 30-day purchase count |
@@ -114,22 +114,22 @@ Each model row means:
 
 Rows missing any required customer ID, product ID, category, business line, purchase date, or quantity are removed during preprocessing and serving ingestion. Required categorical values are never replaced with a synthetic missing token.
 
-`average_days_between_customer_product_purchases`, `std_days_between_customer_product_purchases`, and `expected_days_before_next_order` remain missing (`NaN`) until the customer's prior history for that product is sufficient to calculate them. `observed_reorder_interval_count` remains `0` when no interval exists, so missing cadence is distinct from a genuine zero-day interval. Once an interval exists, the standard deviation is the population standard deviation (`ddof=0`), which is `0` for one observed interval.
+`average_days_between_customer_product_purchases`, `std_days_between_customer_product_purchases`, and `expected_days_before_next_order` remain missing (`NaN`) until the customer's prior history for that product is sufficient to calculate them. Once an interval exists, the standard deviation is the population standard deviation (`ddof=0`), which is `0` for one observed interval.
 
-The current purchase-only CatBoost model uses 18 inputs. It excludes gift/receipt-history fields and redundant boolean, median, customer-order-count, quantity-trend, and replenishment-progress fields, while retaining product context, reorder cadence and variability, affinity depth, and point-in-time product popularity.
+The current purchase-only CatBoost model uses 17 inputs. It excludes gift/receipt-history fields and redundant boolean, median, customer-order-count, quantity-trend, and replenishment-progress fields, while retaining product context, reorder cadence and variability, affinity depth, and point-in-time product popularity.
 
 ### Output
 
-CatBoost outputs one numeric relevance score per candidate product. Products are sorted by that score inside the customer’s group:
+CatBoost outputs an estimated purchase probability for every candidate product. Products are sorted by that probability inside the customer’s group:
 
 ```text
 customer scoring group
-├── Product A  score 2.41  → rank 1
-├── Product C  score 1.76  → rank 2
-└── Product B  score 0.93  → rank 3
+├── Product A  probability 72%  → rank 1
+├── Product C  probability 41%  → rank 2
+└── Product B  probability 18%  → rank 3
 ```
 
-The score is not a calibrated purchase probability. Its purpose is ordering candidates.
+The probability is conditional on the candidate-generation policy used during training. The evaluator reports both recommendation-ranking metrics and probability-quality metrics.
 
 ## Evaluation, without the jargon
 
@@ -156,6 +156,9 @@ The evaluator also reports:
 - **catalogue coverage** — how much of the candidate catalogue is ever recommended;
 - **first-purchase Recall@K** — recall for products the customer had never paid for before;
 - **repeat-purchase Recall@K** — recall for purchased products with earlier paid history.
+- **log loss and Brier score** — how accurate the returned probabilities are;
+- **ROC AUC** — how well probabilities separate purchased from non-purchased candidates;
+- **expected calibration error** — how closely predicted probabilities match observed purchase rates.
 
 Metrics are always compared with simple baselines. A sophisticated model is useful only if it beats an understandable alternative.
 
@@ -196,13 +199,13 @@ uv run --with-requirements requirements.txt \
 ### Use the published baseline
 
 ```python
-from catboost import CatBoostRanker
+from catboost import CatBoostClassifier
 
-model = CatBoostRanker()
-model.load_model("models/catboost_ranker.cbm")
+model = CatBoostClassifier()
+model.load_model("models/catboost_classifier.cbm")
 ```
 
-The model expects the 18-feature purchase-only subset selected in the training configuration from the schema created by the candidate-building notebook. It returns relative ranking scores, not calibrated purchase probabilities.
+The model expects the 17-feature purchase-only subset selected in the training configuration from the schema created by the candidate-building notebook. It returns candidate-level estimated purchase probabilities.
 
 ## Repository layout
 
@@ -214,9 +217,9 @@ The model expects the 18-feature purchase-only subset selected in the training c
 │   ├── 01_clean_purchases.ipynb     # Private-data cleaning
 │   └── 02_build_historical_features.ipynb
 ├── models/
-│   └── catboost_ranker.cbm           # Reviewed CatBoost baseline
+│   └── catboost_classifier.cbm       # CatBoost purchase classifier
 ├── artifacts/
-│   └── catboost/
+│   └── catboost_classifier/
 │       ├── metrics.json              # Aggregate evaluation results
 │       └── feature_importance.csv    # Aggregate feature importance
 ├── scripts/
@@ -250,6 +253,7 @@ Tracked notebooks contain source code only. The published model, aggregate metri
 
 - Candidate groups contain at least 25 sampled products and remain smaller than the production catalogue.
 - Offline quality still depends on whether production candidate retrieval supplies similarly difficult and relevant products.
+- Returned probabilities are conditional on the training candidate-generation policy rather than the entire product catalogue.
 - Repeat-purchase ranking should be evaluated separately from first-purchase discovery.
 - A future production evaluation should use the exact candidate-generation policy used at inference time.
 
@@ -258,11 +262,11 @@ Tracked notebooks contain source code only. The published model, aggregate metri
 - [x] Privacy-safe cleaning pipeline
 - [x] Point-in-time customer-product features
 - [x] Truthful positive and negative candidates
-- [x] Customer-disjoint CatBoost ranking baseline
+- [x] Customer-disjoint CatBoost classifier
 - [x] Ranking metrics and simple baselines
 - [ ] Synthetic-data regression tests
 - [ ] Production-scale candidate retrieval
-- [ ] Probability calibration and serving interface
+- [x] Probability scoring and serving interface
 - [ ] Monitoring for drift, coverage, and recommendation quality
 
 ---

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train and evaluate a customer-disjoint CatBoost product ranker."""
+"""Train and evaluate a customer-disjoint CatBoost product classifier."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from typing import Any
 import catboost
 import numpy as np
 import pandas as pd
-from catboost import CatBoostRanker, Pool
+from catboost import CatBoostClassifier, Pool
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -35,7 +35,7 @@ class PreparedSplit:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Train a CatBoostRanker using customer-disjoint train, validation, "
+            "Train a CatBoostClassifier using customer-disjoint train, validation, "
             "and test splits."
         )
     )
@@ -379,7 +379,6 @@ def build_pool(
     return Pool(
         data=features,
         label=frame["label"].astype("int8"),
-        group_id=frame["group_id"],
         cat_features=categorical_features,
         feature_names=feature_columns,
     )
@@ -518,6 +517,75 @@ def ranking_metrics(
     return metrics, scored
 
 
+def probability_metrics(
+    labels: pd.Series,
+    probabilities: np.ndarray,
+    calibration_bins: int = 10,
+) -> dict[str, float]:
+    """Evaluate discrimination and calibration of classifier probabilities."""
+    binary_labels = labels.to_numpy(dtype=float)
+    clipped_probabilities = np.clip(
+        np.asarray(probabilities, dtype=float),
+        np.finfo(float).eps,
+        1.0 - np.finfo(float).eps,
+    )
+
+    positive_count = int(binary_labels.sum())
+    negative_count = int(len(binary_labels) - positive_count)
+    if positive_count == 0 or negative_count == 0:
+        roc_auc = float("nan")
+    else:
+        probability_ranks = pd.Series(clipped_probabilities).rank(
+            method="average"
+        )
+        positive_rank_sum = float(
+            probability_ranks[binary_labels == 1].sum()
+        )
+        roc_auc = (
+            positive_rank_sum
+            - (positive_count * (positive_count + 1) / 2.0)
+        ) / (positive_count * negative_count)
+
+    bin_edges = np.linspace(0.0, 1.0, calibration_bins + 1)
+    bin_indices = np.digitize(
+        clipped_probabilities,
+        bin_edges[1:-1],
+    )
+    expected_calibration_error = 0.0
+    for bin_index in range(calibration_bins):
+        bin_mask = bin_indices == bin_index
+        if not bin_mask.any():
+            continue
+        expected_calibration_error += (
+            float(bin_mask.mean())
+            * abs(
+                float(clipped_probabilities[bin_mask].mean())
+                - float(binary_labels[bin_mask].mean())
+            )
+        )
+
+    return {
+        "log_loss": float(
+            -np.mean(
+                binary_labels * np.log(clipped_probabilities)
+                + (1.0 - binary_labels)
+                * np.log(1.0 - clipped_probabilities)
+            )
+        ),
+        "brier_score": float(
+            np.mean((clipped_probabilities - binary_labels) ** 2)
+        ),
+        "roc_auc": float(roc_auc),
+        "expected_calibration_error": float(
+            expected_calibration_error
+        ),
+        "mean_predicted_probability": float(
+            clipped_probabilities.mean()
+        ),
+        "observed_positive_rate": float(binary_labels.mean()),
+    }
+
+
 def save_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as output_file:
@@ -544,7 +612,7 @@ def train(config: dict[str, Any]) -> dict[str, Any]:
     print(f"Model features ({len(feature_columns)}): {feature_columns}")
     print(f"Categorical features: {categorical_features}")
 
-    model = CatBoostRanker(**config["model"])
+    model = CatBoostClassifier(**config["model"])
     model.fit(
         prepared["train"].pool,
         eval_set=prepared["validation"].pool,
@@ -555,17 +623,24 @@ def train(config: dict[str, Any]) -> dict[str, Any]:
         {int(value) for value in config["evaluation"]["top_k"]}
     )
     evaluation_metrics: dict[str, dict[str, float]] = {}
+    probability_evaluation: dict[str, dict[str, float]] = {}
     baseline_metrics: dict[str, dict[str, dict[str, float]]] = {}
     test_predictions: pd.DataFrame | None = None
     for split_index, split_name in enumerate(("validation", "test")):
         split_frame = prepared[split_name].frame
-        predictions = model.predict(prepared[split_name].pool)
+        predictions = model.predict_proba(
+            prepared[split_name].pool
+        )[:, 1]
         metrics, scored = ranking_metrics(
             split_frame,
             predictions,
             top_k_values,
         )
         evaluation_metrics[split_name] = metrics
+        probability_evaluation[split_name] = probability_metrics(
+            split_frame["label"],
+            predictions,
+        )
 
         random_generator = np.random.default_rng(
             int(config["split"]["random_seed"]) + split_index
@@ -598,7 +673,9 @@ def train(config: dict[str, Any]) -> dict[str, Any]:
             "purchase_history": history_metrics,
         }
         if split_name == "test":
-            test_predictions = scored
+            test_predictions = scored.rename(
+                columns={"prediction": "purchase_probability"}
+            )
 
     model_path = resolve_path(config["outputs"]["model_path"])
     metrics_path = resolve_path(config["outputs"]["metrics_path"])
@@ -629,6 +706,7 @@ def train(config: dict[str, Any]) -> dict[str, Any]:
     test_predictions.to_csv(predictions_path, index=False)
 
     results = {
+        "model_type": "CatBoostClassifier",
         "split_strategy": "customer_disjoint",
         "split_summary": split_summary,
         "feature_columns": feature_columns,
@@ -636,6 +714,7 @@ def train(config: dict[str, Any]) -> dict[str, Any]:
         "best_iteration": int(model.get_best_iteration()),
         "best_score": model.get_best_score(),
         "ranking_metrics": evaluation_metrics,
+        "probability_metrics": probability_evaluation,
         "baseline_metrics": baseline_metrics,
         "split_config": config["split"],
         "model_parameters": config["model"],
@@ -661,7 +740,8 @@ def train(config: dict[str, Any]) -> dict[str, Any]:
     print(
         json.dumps(
             {
-                "catboost": evaluation_metrics,
+                "catboost_classifier": evaluation_metrics,
+                "probability_metrics": probability_evaluation,
                 "baselines": baseline_metrics,
             },
             indent=2,

@@ -4,8 +4,7 @@ import re
 from pathlib import Path
 import numpy as np
 import pandas as pd
-from catboost import CatBoostRanker
-import joblib
+from catboost import CatBoostClassifier
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -456,25 +455,16 @@ def evaluate(features):
     # here should be sequence model results
 
     ranked_products = rank_with_the_final_model(features)
-
-    calibrator = joblib.load(
-        "models/purchase_probability_calibrator.joblib"
-    )
-
-    ranked_products["purchase_probability"] = (
-        calibrator.predict_proba(
-            ranked_products[["prediction", "standardized_gap_from_top", "group_z_score", "historical_score", "rank"]]
-        )[:, 1]
-    )
-
-    ranked_products['purchase_probability'] = ranked_products['purchase_probability'].map("{:.2%}".format)
+    ranked_products["purchase_probability"] = ranked_products[
+        "purchase_probability"
+    ].map("{:.2%}".format)
 
     return ranked_products
 
 def rank_with_the_final_model(candidates: pd.DataFrame):
     candidates = candidates.copy()
-    model = CatBoostRanker()
-    model.load_model(PROJECT_ROOT / "models" / "catboost_ranker.cbm")
+    model = CatBoostClassifier()
+    model.load_model(PROJECT_ROOT / "models" / "catboost_classifier.cbm")
 
     feature_columns = model.feature_names_
     categorical_columns = {
@@ -507,24 +497,14 @@ def rank_with_the_final_model(candidates: pd.DataFrame):
             if column not in NULLABLE_CADENCE_FEATURES:
                 model_input[column] = model_input[column].fillna(0)
 
-    candidates["prediction"] = model.predict(model_input)
-    prediction_mean = candidates["prediction"].mean()
-    prediction_std = candidates["prediction"].std(ddof=0)
-    if np.isfinite(prediction_std) and prediction_std > 0:
-        candidates["group_z_score"] = (
-            candidates["prediction"] - prediction_mean
-        ) / prediction_std
-        candidates["standardized_gap_from_top"] = (
-            candidates["prediction"].max() - candidates["prediction"]
-        ) / prediction_std
-    else:
-        candidates["group_z_score"] = 0.0
-        candidates["standardized_gap_from_top"] = 0.0
+    candidates["purchase_probability"] = model.predict_proba(
+        model_input
+    )[:, 1]
 
     ranked_products = (
         candidates
         .sort_values(
-            ["prediction", "product_id"],
+            ["purchase_probability", "product_id"],
             ascending=[False, True],
         )
         .reset_index(drop=True)

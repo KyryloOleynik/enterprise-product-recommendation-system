@@ -25,6 +25,7 @@ configs/local*.yaml
 *.cbm
 *.pkl
 *.pickle
+*.joblib
 
 # Notebook source is tracked, but executed outputs must be cleared before publishing.
 
